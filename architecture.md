@@ -1,6 +1,6 @@
 # Architecture du pipeline GStreamer
 
-Ce document décrit le pipeline actuellement construit par `monitor_sender`, avec la configuration de l’équipe. Le DOT complet est produit par l’application ; [`evidence/pipeline.png`](evidence/pipeline.png) en donne une représentation simplifiée dont les éléments et les connexions correspondent au graphe observé.
+Ce document décrit le pipeline actuellement construit par `monitor_sender`, avec la configuration de l’équipe. Le DOT complet est produit par l’application ; [`evidence/pipeline.png`](evidence/pipeline.png) est son rendu Graphviz.
 
 ## Diagramme du pipeline actuellement implémenté
 
@@ -80,4 +80,4 @@ dot -Tpng "$(ls -t evidence/*-monitor-sender.dot | head -n 1)" \
   -o evidence/pipeline.png
 ```
 
-Le PNG fourni simplifie les pads détaillés du DOT pour rendre les douze éléments et les trois branches lisibles. Le graphe a été capturé en mode headless : le sink de prévisualisation est donc lui aussi un `fakesink`.
+Le graphe est rendu directement depuis le DOT, avec les détails de caps et de pads. Il a été capturé en mode headless : le sink de prévisualisation est donc lui aussi un `fakesink`.
