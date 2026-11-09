@@ -258,8 +258,7 @@ bool build_pipeline(const Options& options, GstElement*& pipeline) {
         return false;
     }
 
-    const int frame_count = options.duration * options.fps;
-    g_object_set(source, "is-live", TRUE, "num-buffers", frame_count, nullptr);
+    g_object_set(source, "is-live", TRUE, nullptr);
     const std::string label_text =
         "Kokou KOMBEDE | Ounissa SADAOUI | Aissatou CISS\n" +
         std::to_string(options.width) + "x" + std::to_string(options.height) +
@@ -316,49 +315,188 @@ bool build_pipeline(const Options& options, GstElement*& pipeline) {
     return true;
 }
 
-int run_pipeline(GstElement* pipeline) {
+struct RuntimeState {
+    GMainLoop* loop;
+    GstElement* pipeline;
+    GstElement* overlay;
+    std::string overlay_text;
+    guint bus_watch_id = 0;
+    guint duration_source_id = 0;
+    guint dynamic_property_source_id = 0;
+    unsigned int elapsed_seconds = 0;
+    int result = EXIT_SUCCESS;
+};
+
+gboolean handle_bus_message(GstBus*, GstMessage* message, gpointer user_data) {
+    auto* runtime = static_cast<RuntimeState*>(user_data);
+
+    switch (GST_MESSAGE_TYPE(message)) {
+        case GST_MESSAGE_ERROR: {
+            GError* error = nullptr;
+            gchar* debug = nullptr;
+            gst_message_parse_error(message, &error, &debug);
+            std::cerr << "monitor_sender: error: "
+                      << GST_OBJECT_NAME(GST_MESSAGE_SRC(message)) << ": "
+                      << (error != nullptr ? error->message : "unknown GStreamer error")
+                      << '\n';
+            if (debug != nullptr && *debug != '\0') {
+                std::cerr << "GStreamer debug: " << debug << '\n';
+            }
+            g_clear_error(&error);
+            g_free(debug);
+            runtime->result = EXIT_FAILURE;
+            runtime->bus_watch_id = 0;
+            g_main_loop_quit(runtime->loop);
+            return G_SOURCE_REMOVE;
+        }
+        case GST_MESSAGE_WARNING: {
+            GError* warning = nullptr;
+            gchar* debug = nullptr;
+            gst_message_parse_warning(message, &warning, &debug);
+            std::cerr << "monitor_sender: warning: "
+                      << GST_OBJECT_NAME(GST_MESSAGE_SRC(message)) << ": "
+                      << (warning != nullptr ? warning->message : "unknown GStreamer warning")
+                      << '\n';
+            if (debug != nullptr && *debug != '\0') {
+                std::cerr << "GStreamer debug: " << debug << '\n';
+            }
+            g_clear_error(&warning);
+            g_free(debug);
+            return G_SOURCE_CONTINUE;
+        }
+        case GST_MESSAGE_EOS:
+            std::cout << "EOS_HANDLED=PASS\n";
+            runtime->bus_watch_id = 0;
+            g_main_loop_quit(runtime->loop);
+            return G_SOURCE_REMOVE;
+        case GST_MESSAGE_STATE_CHANGED:
+            if (GST_MESSAGE_SRC(message) == GST_OBJECT(runtime->pipeline)) {
+                GstState old_state;
+                GstState new_state;
+                GstState pending_state;
+                gst_message_parse_state_changed(
+                    message, &old_state, &new_state, &pending_state);
+                std::cout << "PIPELINE_STATE="
+                          << gst_element_state_get_name(new_state) << '\n';
+            }
+            return G_SOURCE_CONTINUE;
+        default:
+            return G_SOURCE_CONTINUE;
+    }
+}
+
+gboolean request_pipeline_eos(gpointer user_data) {
+    auto* runtime = static_cast<RuntimeState*>(user_data);
+    runtime->duration_source_id = 0;
+
+    std::cout << "DURATION_EXPIRED=PASS\n";
+    if (!gst_element_send_event(runtime->pipeline, gst_event_new_eos())) {
+        std::cerr << "monitor_sender: error: could not send EOS to the pipeline\n";
+        runtime->result = EXIT_FAILURE;
+        g_main_loop_quit(runtime->loop);
+    } else {
+        std::cout << "EOS_REQUESTED=PASS\n";
+    }
+    return G_SOURCE_REMOVE;
+}
+
+gboolean update_dynamic_property(gpointer user_data) {
+    auto* runtime = static_cast<RuntimeState*>(user_data);
+    runtime->elapsed_seconds += 5;
+
+    const std::string text = runtime->overlay_text + "\nRuntime: " +
+                             std::to_string(runtime->elapsed_seconds) + " s";
+    g_object_set(runtime->overlay, "text", text.c_str(), nullptr);
+    std::cout << "DYNAMIC_PROPERTY element=team-overlay property=text "
+              << "value=\"Runtime: " << runtime->elapsed_seconds << " s\"\n";
+    return G_SOURCE_CONTINUE;
+}
+
+int run_pipeline(GstElement* pipeline, unsigned int duration_seconds) {
     GstBus* bus = gst_element_get_bus(pipeline);
     if (bus == nullptr) {
         std::cerr << "monitor_sender: error: could not access the GStreamer bus\n";
         return EXIT_FAILURE;
     }
 
-    const GstStateChangeReturn state = gst_element_set_state(pipeline, GST_STATE_PLAYING);
-    if (state == GST_STATE_CHANGE_FAILURE) {
-        std::cerr << "monitor_sender: error: pipeline failed to enter PLAYING state\n";
+    GstElement* overlay = gst_bin_get_by_name(GST_BIN(pipeline), "team-overlay");
+    if (overlay == nullptr) {
+        std::cerr << "monitor_sender: error: could not access the team text overlay\n";
         gst_object_unref(bus);
         return EXIT_FAILURE;
     }
 
-    GstMessage* message = gst_bus_timed_pop_filtered(
-        bus, GST_CLOCK_TIME_NONE,
-        static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
-    int result = EXIT_SUCCESS;
-    if (message == nullptr) {
-        std::cerr << "monitor_sender: error: pipeline stopped without EOS or error\n";
-        result = EXIT_FAILURE;
-    } else if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
-        GError* error = nullptr;
-        gchar* debug = nullptr;
-        gst_message_parse_error(message, &error, &debug);
-        std::cerr << "monitor_sender: error: "
-                  << GST_OBJECT_NAME(GST_MESSAGE_SRC(message)) << ": "
-                  << (error != nullptr ? error->message : "unknown GStreamer error")
-                  << '\n';
-        if (debug != nullptr && *debug != '\0') {
-            std::cerr << "GStreamer debug: " << debug << '\n';
-        }
-        g_clear_error(&error);
-        g_free(debug);
-        result = EXIT_FAILURE;
+    gchar* overlay_text = nullptr;
+    g_object_get(overlay, "text", &overlay_text, nullptr);
+    if (overlay_text == nullptr) {
+        std::cerr << "monitor_sender: error: could not read the initial overlay text\n";
+        gst_object_unref(overlay);
+        gst_object_unref(bus);
+        return EXIT_FAILURE;
     }
 
-    if (message != nullptr) {
-        gst_message_unref(message);
+    RuntimeState runtime{
+        g_main_loop_new(nullptr, FALSE),
+        pipeline,
+        overlay,
+        overlay_text
+    };
+    g_free(overlay_text);
+    if (runtime.loop == nullptr) {
+        std::cerr << "monitor_sender: error: could not create the GLib main loop\n";
+        gst_object_unref(overlay);
+        gst_object_unref(bus);
+        return EXIT_FAILURE;
     }
-    gst_element_set_state(pipeline, GST_STATE_NULL);
+
+    runtime.bus_watch_id = gst_bus_add_watch(bus, handle_bus_message, &runtime);
+    if (runtime.bus_watch_id == 0) {
+        std::cerr << "monitor_sender: error: could not register the GStreamer bus watch\n";
+        g_main_loop_unref(runtime.loop);
+        gst_object_unref(overlay);
+        gst_object_unref(bus);
+        return EXIT_FAILURE;
+    }
+
+    const GstStateChangeReturn state = gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    if (state == GST_STATE_CHANGE_FAILURE) {
+        std::cerr << "monitor_sender: error: pipeline failed to enter PLAYING state\n";
+        runtime.result = EXIT_FAILURE;
+    } else {
+        runtime.duration_source_id =
+            g_timeout_add_seconds(duration_seconds, request_pipeline_eos, &runtime);
+        runtime.dynamic_property_source_id =
+            g_timeout_add_seconds(5, update_dynamic_property, &runtime);
+        if (runtime.duration_source_id == 0 ||
+            runtime.dynamic_property_source_id == 0) {
+            std::cerr << "monitor_sender: error: could not register runtime timers\n";
+            runtime.result = EXIT_FAILURE;
+        } else {
+            std::cout << "SENDER_STATE=PLAYING\n";
+            g_main_loop_run(runtime.loop);
+        }
+    }
+
+    if (runtime.duration_source_id != 0) {
+        g_source_remove(runtime.duration_source_id);
+    }
+    if (runtime.dynamic_property_source_id != 0) {
+        g_source_remove(runtime.dynamic_property_source_id);
+    }
+    if (runtime.bus_watch_id != 0) {
+        g_source_remove(runtime.bus_watch_id);
+    }
+    if (gst_element_set_state(pipeline, GST_STATE_NULL) == GST_STATE_CHANGE_FAILURE) {
+        std::cerr << "monitor_sender: error: failed to stop the pipeline cleanly\n";
+        runtime.result = EXIT_FAILURE;
+    } else {
+        std::cout << "SENDER_STATE=NULL\n";
+    }
+
+    g_main_loop_unref(runtime.loop);
+    gst_object_unref(overlay);
     gst_object_unref(bus);
-    return result;
+    return runtime.result;
 }
 
 }  // namespace
@@ -379,7 +517,7 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    const int result = run_pipeline(pipeline);
+    const int result = run_pipeline(pipeline, static_cast<unsigned int>(options.duration));
     gst_object_unref(pipeline);
     return result;
 }
