@@ -1,1 +1,1 @@
-1- repartion impartial des tâches entre les 3 membres du groupe (fichier CAHIER_DES_SPECIFICATIONS.md)
+Répartition impartiale des tâches entre les trois membres du groupe (fichier CAHIER_DES_SPECIFICATIONS.md).
