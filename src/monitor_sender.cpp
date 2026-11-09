@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include <gst/gst.h>
+#include <gst/gstdebugutils.h>
 
 namespace {
 
@@ -325,6 +326,7 @@ struct RuntimeState {
     guint dynamic_property_source_id = 0;
     unsigned int elapsed_seconds = 0;
     int result = EXIT_SUCCESS;
+    bool graph_dumped = false;
 };
 
 gboolean handle_bus_message(GstBus*, GstMessage* message, gpointer user_data) {
@@ -378,6 +380,14 @@ gboolean handle_bus_message(GstBus*, GstMessage* message, gpointer user_data) {
                     message, &old_state, &new_state, &pending_state);
                 std::cout << "PIPELINE_STATE="
                           << gst_element_state_get_name(new_state) << '\n';
+                if (new_state == GST_STATE_PLAYING && !runtime->graph_dumped &&
+                    g_getenv("GST_DEBUG_DUMP_DOT_DIR") != nullptr) {
+                    gst_debug_bin_to_dot_file_with_ts(
+                        GST_BIN(runtime->pipeline), GST_DEBUG_GRAPH_SHOW_ALL,
+                        "monitor-sender");
+                    runtime->graph_dumped = true;
+                    std::cout << "PIPELINE_GRAPH_DUMPED=PASS\n";
+                }
             }
             return G_SOURCE_CONTINUE;
         default:
