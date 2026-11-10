@@ -1,4 +1,4 @@
-# tp Gstreamer 
+# tp Gstreamer
 
 # TP GStreamer — Système de vidéosurveillance
 
